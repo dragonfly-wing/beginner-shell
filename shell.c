@@ -23,9 +23,33 @@ typedef enum {
 
 typedef enum { LOOP_CONTINUE, LOOP_EXIT } LoopVariable;
 
+//enum for token types
+typedef enum {
+  TOK_WORD,
+  TOK_PIPE,
+  TOK_REDIR_OUT,
+  TOK_REDIR_IN,
+  TOK_REDIR_APPEND,
+  TOK_EOF
+} TokenType;
+
+//structure to represent the token
+typedef struct {
+  TokenType type;
+  const char *start;
+  int length;
+} Token;
+
+//structure to represent the array which stores the tokens.
+typedef struct {
+  Token *data;
+  int count;
+  int capacity;
+} TokenArray;
+
 //Function declarations
 ErrorCode read_line(char **line);
-ErrorCode split_line(char *line, char ***args);
+ErrorCode split_line(char *line, TokenArray *tok);
 ErrorCode execute(char **args);
 ErrorCode sh_launch(char **args);
 ErrorCode split_pipe(char *line, char ***pipe_args, int *count_args);
@@ -34,21 +58,6 @@ ErrorCode pipe_execute(char ***pipe_args, int count);
 ErrorCode sh_cd(char **args);
 ErrorCode sh_help(char **args);
 ErrorCode sh_exit(char **args);
-
-
-/* array of the builtins 
-   char *built_in[] = {"cd", "help", "exit"};
-
-   to get the size of the built_ins array
-   int builtin_size()
-   {
-   return sizeof(built_in) / sizeof(char*);
-   };
-
-   //to call the approprotiate functions for the built_ins.
-   int (*built_in_func[])(char **args)  = { &sh_cd ,  &sh_help , &sh_exit};  //here, this is an array of pointers to functions of parameter type char **args, and return type int.
-*/
-
 
 //a struct to represent the built-in commands 
 typedef struct {
@@ -125,24 +134,108 @@ LoopVariable error_handler(ErrorCode code) {
     }
 }
 
+
+
+//-----------------------------------------------
+// tokenizer
+
+
+
+ErrorCode check_capacity(TokenArray *tok) {
+  if (tok->count < tok->capacity) {
+    return E_OK;
+  }
+  tok->capacity *= 2;
+  Token *tmp = realloc(tok->data, tok->capacity * sizeof(Token));
+  if (!tmp) {
+    return E_ALLOC;
+  }
+  tok->data = tmp;
+  return E_OK;
+}
+
+void free_tokens(TokenArray *tok) {
+  free(tok->data);
+  tok->data = NULL;
+  tok->capacity = 0;
+  tok->count=0;
+}
+
+ErrorCode tokenize(TokenArray *tokens, const char *message) {
+  ErrorCode err;
+  tokens->count = 0;
+  tokens->capacity = 8;
+  tokens->data = malloc(tokens->capacity * sizeof(Token));
+  if (!tokens->data) {
+    return E_ALLOC;
+  }
+
+  int i = 0;
+  while (message[i] != '\0') {
+    
+    
+      
+    if (isspace(message[i])) {
+      i++;
+      continue;
+    }
+
+
+    err = check_capacity(tokens);
+    if (err != E_OK) {
+      goto fail;
+    }
+    
+    if (message[i] == '|') {
+      tokens->data[tokens->count] = (Token){TOK_PIPE, &message[i], 1};
+      i++;
+    }
+
+    else {
+      int start = i;
+      
+      while(message[i] && !isspace(message[i]) && message[i]!='|'){
+        i++;
+      }
+      int length = i - start;
+      tokens->data[tokens->count]=(Token){TOK_WORD , &message[start],length};
+    }
+    tokens->count++;
+  }
+
+  err = check_capacity(tokens);
+  if (err != E_OK) {
+    goto fail;
+  }
+ 
+  tokens->data[tokens->count++]=(Token){TOK_EOF,NULL,0};
+
+  return E_OK;
+
+ fail:
+  free_tokens(tokens);
+  return err;
+}
+
+//------------------ 
 //Function for cd 
 ErrorCode sh_cd(char **args)
 {
-    if(args[1]==NULL)
+  if(args[1]==NULL)
+    {
+      if(chdir(getenv("HOME"))!=0)
         {
-            if(chdir(getenv("HOME"))!=0)
-                {
-                    return E_SYSCALL;
-                }
+          return E_SYSCALL;
         }
-    else 
+    }
+  else 
+    {
+      if(chdir(args[1])!=0)   //chdir changes the directory.
         {
-            if(chdir(args[1])!=0)   //chdir changes the directory.
-                {
-                    return E_SYSCALL;
-                }
+          return E_SYSCALL;
         }
-    return E_OK;
+    }
+  return E_OK;
 }
 
 //function to display the help mennu
@@ -311,7 +404,7 @@ ErrorCode pipe_execute(char ***pipe_args, int count)
 #define BUFSIZE 64                  //the initial size of the array
 #define DELIIMITER " \n\t\a\r"      //the delimiters to look for when parsing
 
-ErrorCode split_line(char *line, char ***args)
+ErrorCode split_line(char *line, TokenArray *tok)
 {   
     int buf_size = BUFSIZE;
     int position=0;
@@ -570,144 +663,148 @@ void free_pipe_args(char ***pipe_args) {
 }
 
 void loop(void) {
-    Redir r = {0};
-    ErrorCode err;
-    char *line=NULL;
-    char **args = NULL;
+  Redir r = {0};
+  TokenArray tokens ={0};
+  ErrorCode err;
+  
+  char *line=NULL;
+  char **args = NULL;
 
-    char **pipe_commands = NULL;
-    char ***pipe_args = NULL;
-    int count;
+  char **pipe_commands = NULL;
+  char ***pipe_args = NULL;
+  int count;
 
-    int status=1;
+  int status=1;
     
-    do {
-        printf(">");
-        err = read_line(&line);
+  do {
+    printf(">");
+    err = read_line(&line);
 
+    if (error_handler(err) == LOOP_EXIT) {
+      goto cleanup;
+    }
+    if (!line) {
+      continue;
+    }
+    
+    //for handling pipe commands
+    if (strchr(line, '|')) {
+      err = split_pipe(line, &pipe_commands,&count);
+      if (err != E_OK) {
         if (error_handler(err) == LOOP_EXIT) {
-            goto cleanup;
+          goto cleanup;
         }
-        if (!line) {
-            continue;
-        }
-    
-        //for handling pipe commands
-        if (strchr(line, '|')) {
-            err = split_pipe(line, &pipe_commands,&count);
-            if (err != E_OK) {
-                if (error_handler(err) == LOOP_EXIT) {
-                    goto cleanup;
-                }
-                continue;
-            }
+        continue;
+      }
 
-            pipe_args = malloc((count + 1) * sizeof(char **));
-            if (!pipe_args) {
-                goto cleanup;
-            }
-            pipe_args[count] = NULL;
+      pipe_args = malloc((count + 1) * sizeof(char **));
+      if (!pipe_args) {
+        goto cleanup;
+      }
+      pipe_args[count] = NULL;
       
-            for (int i = 0; pipe_commands[i] != NULL; i++) {
-                err = split_line(pipe_commands[i], &pipe_args[i]);
-                if (err != E_OK) {
-                  if (error_handler(err) == LOOP_EXIT) {
-                      goto cleanup;
-                  }
-                  goto pipe_fail;
-                }
-            }
-
-            err = pipe_execute(pipe_args, count);
-            if(err!=E_OK){
-                if (error_handler(err) == LOOP_EXIT) {
-                    goto cleanup;
-                }
-                goto pipe_fail; 
-            }
-
-        pipe_fail:
-            free_pipe_args(pipe_args);
-            free_args(pipe_commands);
-            pipe_commands=NULL;
-            pipe_args = NULL;
-            continue;
+      for (int i = 0; pipe_commands[i] != NULL; i++) {
+        err = split_line(pipe_commands[i], &pipe_args[i]);
+        if (err != E_OK) {
+          if (error_handler(err) == LOOP_EXIT) {
+            goto cleanup;
+          }
+          goto pipe_fail;
         }
+      }
 
-        // for simple cmd > file type redirection 
-        else if ((strchr(line, '>')) || (strchr(line, '<')) ) {
-            err = parse_redir(line, &r);
-            if (err != E_OK) {
-                if (error_handler(err) == LOOP_EXIT) {
-                    goto cleanup;
-                }
-                continue;
-            }
+      err = pipe_execute(pipe_args, count);
+      if(err!=E_OK){
+        if (error_handler(err) == LOOP_EXIT) {
+          goto cleanup;
+        }
+        goto pipe_fail; 
+      }
 
-            err = split_line(r.cmd, &r.args);
-            if(err!=E_OK){
-                if (error_handler(err) == LOOP_EXIT) {
-                    goto cleanup;
-                }
-                continue;
-            }
+    pipe_fail:
+      free_pipe_args(pipe_args);
+      free_args(pipe_commands);
+      pipe_commands=NULL;
+      pipe_args = NULL;
+      continue;
+    }
 
-            err = redir_execution(r);
-            if(err!=E_OK){
-                if (error_handler(err) == LOOP_EXIT) {
-                    goto cleanup;
-                }
-                continue;
-            }
+    // for simple cmd > file type redirection 
+    else if ((strchr(line, '>')) || (strchr(line, '<')) ) {
+      err = parse_redir(line, &r);
+      if (err != E_OK) {
+        if (error_handler(err) == LOOP_EXIT) {
+          goto cleanup;
+        }
+        continue;
+      }
+
+      err = split_line(r.cmd, &r.args);
+      if(err!=E_OK){
+        if (error_handler(err) == LOOP_EXIT) {
+          goto cleanup;
+        }
+        continue;
+      }
+
+      err = redir_execution(r);
+      if(err!=E_OK){
+        if (error_handler(err) == LOOP_EXIT) {
+          goto cleanup;
+        }
+        continue;
+      }
             
-            for (int i = 0; r.args[i] != NULL; i++) {
-                free(r.args[i]);
-            }
-            free_args(r.args);
-            free(r.cmd);
-            free(r.file);
-        }
+      for (int i = 0; r.args[i] != NULL; i++) {
+        free(r.args[i]);
+      }
+      free_args(r.args);
+      free(r.cmd);
+      free(r.file);
+    }
 
-        // for handling normal commands
-        else {
-          err = split_line(line, &args); // args is an array of pointers where
-                                         // each pointer point to a string
-          if(err!=E_OK){
+    // for handling normal commands
+    else {
+      err = split_line(line, &tokens);  
+      if(err!=E_OK){
 
-              if (error_handler(err) == LOOP_EXIT){
-                  goto cleanup;
-              }
-              continue;
-          }
-          err = execute(args);
-          if(err!=E_OK){
-              if (error_handler(err) == LOOP_EXIT){
-                  goto cleanup;
-              }
-              continue;
-          }
-          free_args(args);
-          args=NULL;
+        if (error_handler(err) == LOOP_EXIT){
+          goto cleanup;
         }
+        continue;
+      }
+      
+      err = execute(args);
+      if(err!=E_OK){
+        if (error_handler(err) == LOOP_EXIT){
+          goto cleanup;
+        }
+        continue;
+      }
+      free_args(args);
+      args=NULL;
+    }
     
-        free(line);
-        line = NULL; // defensive style: setting unused pointers to NULL.
-    } while (status);
+    free(line);
+    line = NULL; // defensive style: setting unused pointers to NULL.
+  } while (status);
   
  cleanup:
-    free(line);
-    free_args(args);
-    free_args(pipe_commands);
-    free_pipe_args(pipe_args);
-    free(r.cmd);
-    free_args(r.args);
-    free(r.file);
-    return;
+  free(line);
+  free_args(args);
+  free_args(pipe_commands);
+  free_pipe_args(pipe_args);
+  free(r.cmd);
+  free_args(r.args);
+  free(r.file);
+  free_tokens(&tokens);
+  return;
 }
 
 int main(int argc, char **argv)
 {
-    //run the command loop
-    loop();
-    return EXIT_SUCCESS;
+  //run the command loop
+  loop();
+  return EXIT_SUCCESS;
 }
+
