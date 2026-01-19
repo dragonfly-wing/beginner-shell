@@ -78,6 +78,9 @@ int main()
             goto cleanup;
         }
 
+        free(line);
+        free_tokens(&tokens);
+
     } while (1);
 
 cleanup:
